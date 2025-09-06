@@ -61,9 +61,17 @@ static void getprocinfo(struct task_struct *task,
 	if (task != NULL) {
 		procInfo->pid = getpid(task);
 	}
-
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
+	procInfo->process_start_time_unix = ns_to_timespec64(task->start_time);
+#else
 	get_starttime(&procInfo->process_start_time_unix);
+#endif
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4,20,0)
 	getnstimeofday(&procInfo->event_time_unix);
+#else
+	ktime_get_real_ts64(&procInfo->event_time_unix);
+#endif
 	procInfo->process_start_time =
 		to_windows_timestamp(&procInfo->process_start_time_unix);
 	procInfo->event_time = to_windows_timestamp(&procInfo->event_time_unix);
