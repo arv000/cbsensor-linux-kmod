@@ -54,11 +54,18 @@ bool file_get_path(struct file *file, char *buffer, char **pathname)
 
 	if (IS_ERR_OR_NULL(*pathname)) {
 		*pathname = buffer;
-
-		strncpy(*pathname, file->f_dentry->d_name.name,
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 6, 0)
+		strncpy(*pathname, file->f_path.dentry->d_name.name,
+			min(file->f_path.dentry->d_name.len,
+			    (unsigned int)PATH_MAX));
+		(*pathname)[file->f_path.dentry->d_name.len] = 0;
+#else
+	strncpy(*pathname, file->f_dentry->d_name.name,
 			min(file->f_dentry->d_name.len,
 			    (unsigned int)PATH_MAX));
 		(*pathname)[file->f_dentry->d_name.len] = 0;
+#endif
+		
 
 		PRINTK(KERN_WARNING,
 		       "Path lookup failed, using |%s| as file name",

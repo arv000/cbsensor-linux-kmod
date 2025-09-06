@@ -16,8 +16,12 @@ bool user_comm_initialize(void);
 void user_comm_shutdown(void);
 int user_comm_send_event(struct CB_EVENT *);
 int user_comm_send_event_atomic(struct CB_EVENT *);
-
+ 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
+uint64_t to_windows_timestamp(struct timespec64 *tv)
+#else
 uint64_t to_windows_timestamp(struct timespec *tv)
+#endif
 {
 	return ((uint64_t)tv->tv_sec * (uint64_t)10000000) +
 	       (uint64_t)116444736000000000 + (tv->tv_nsec / 100);

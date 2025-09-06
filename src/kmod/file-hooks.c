@@ -210,7 +210,7 @@ static inline bool __is_special_filesystem(struct super_block *sb)
 	case BPF_FS_MAGIC:
 #endif /* BPF_FS_MAGIC */
 #ifdef TRACEFS_MAGIC
-	case TRACEFS_MAGIC
+	case TRACEFS_MAGIC:
 #endif /* TRACEFS_MAGIC */
 
 		return true;
@@ -413,7 +413,9 @@ int on_inode_create(struct inode *dir, struct dentry *dentry, int mode)
 {
 	int xcode;
 	MODULE_GET();
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 4, 0)
 	xcode = g_original_ops_ptr->inode_create(dir, dentry, mode);
+	#endif
 	TRY(xcode == 0);
 
 	logger_on_generic_file_event(dentry, CB_EVENT_TYPE_FILE_CREATE, mode);
@@ -427,7 +429,9 @@ int on_inode_unlink(struct inode *dir, struct dentry *dentry)
 {
 	int xcode;
 	MODULE_GET();
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 4, 0)
 	xcode = g_original_ops_ptr->inode_unlink(dir, dentry);
+#endif
 	TRY(xcode == 0);
 
 	logger_on_generic_file_event(dentry, CB_EVENT_TYPE_FILE_DELETE, 0);
@@ -442,8 +446,10 @@ int on_inode_rename(struct inode *old_dir, struct dentry *old_dentry,
 {
 	int xcode;
 	MODULE_GET();
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 4, 0)
 	xcode = g_original_ops_ptr->inode_rename(old_dir, old_dentry, new_dir,
 						 new_dentry);
+#endif
 	TRY(xcode == 0);
 
 	logger_on_generic_file_event(old_dentry, CB_EVENT_TYPE_FILE_DELETE, 0);
@@ -459,8 +465,9 @@ int on_file_permission(struct file *file, int mask)
 	bool write = (mask & MAY_WRITE) == MAY_WRITE;
 	int xcode = 0;
 	MODULE_GET();
-
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 4, 0)
 	xcode = g_original_ops_ptr->file_permission(file, mask);
+#endif
 	TRY(xcode == 0);
 
 	if (write) {
@@ -476,9 +483,9 @@ void on_file_free(struct file *file)
 {
 	bool has_write = ((file->f_mode & FMODE_WRITE) != 0);
 	MODULE_GET();
-
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 4, 0)
 	g_original_ops_ptr->file_free_security(file);
-
+#endif
 	if (has_write) {
 		do_file_close_event(file);
 	}
@@ -602,11 +609,17 @@ asmlinkage long cb_sys_write(unsigned int fd, const char __user *buf,
 	commit_change = true;
 
 	// The file system file ops do not support vfs_llseek or vfs_read
-	if (!file->f_op || (!file->f_op->read && !file->f_op->aio_read) ||
-	    (!file->f_op->llseek)) {
-		state.try_vfs_read = false;
-		goto CATCH_DEFAULT;
+	if (!file->f_op ||
+	    (!file->f_op->read &&
+	#if LINUX_VERSION_CODE < KERNEL_VERSION(4,1,0)
+	     !file->f_op->aio_read &&
+	#endif
+	     !file->f_op->read_iter) ||
+	    !file->f_op->llseek) {
+	    state.try_vfs_read = false;
+	    goto CATCH_DEFAULT;
 	}
+
 
 	// Attempt get beginning of file contents via VFS
 	// There's been enough checks on file position and boundaries.
@@ -636,11 +649,20 @@ asmlinkage long cb_sys_write(unsigned int fd, const char __user *buf,
 
 		// Disable memory checks because we are passing in a kernel
 		// buffer instead of a user buffer
-		oldfs = get_fs();
-		set_fs(KERNEL_DS);
-		size = vfs_read(file, buffer, MAX_FILE_BYTES_TO_DETERMINE_TYPE,
-				&pos);
-		set_fs(oldfs);
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4,14,0)
+	    mm_segment_t oldfs;
+
+	    oldfs = get_fs();
+	    set_fs(KERNEL_DS);
+	    size = vfs_read(file, buffer, len, pos);
+	    set_fs(oldfs);
+
+#elif LINUX_VERSION_CODE < KERNEL_VERSION(5,10,0)
+	    size = kernel_read(file, buffer, size, pos);
+
+#else
+	    size = kernel_read(file, buffer, size, pos);
+#endif
 
 		// Seek back to where the file was be so that the next write
 		// will work
@@ -715,7 +737,12 @@ static void do_file_write_event(struct file *file)
 	dev = get_dev_from_file(file);
 	ino = inode->i_ino;
 	// seconds since boot should be unique enough
-	time = current->start_time.tv_sec;
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4,11,0)
+    time = current->start_time.tv_sec;    
+#else
+    time = div_u64(current->start_time, NSEC_PER_SEC);  
+#endif
+
 	cached_ret = fwc_entry_exists(pid, ino, dev, time, GFP_KERNEL);
 	if (cached_ret == 0) {
 		return;

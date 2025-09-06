@@ -75,7 +75,9 @@ static inline void *__cb_cache_alloc(struct kmem_cache *cache, gfp_t gfp)
 {
 	void *dest = kmem_cache_alloc(cache, gfp);
 	if (dest) {
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 10, 0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 0, 0)
+	kmem_cache_free(cache, dest);
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(3, 10, 0)
 		memset(dest, 0, cache->object_size);
 #else
 		memset(dest, 0, cache->buffer_size);
@@ -212,8 +214,11 @@ extern size_t cb_ntop(const struct sockaddr *sap, char *buf, size_t buflen,
 // ------------------------------------------------
 // General Helpers
 //
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
+uint64_t to_windows_timestamp(struct timespec64 *tv);
+#else
 uint64_t to_windows_timestamp(struct timespec *tv);
-
+#endif
 // ------------------------------------------------
 // Event Cache
 struct CB_EVENT_DATA {
