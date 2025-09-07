@@ -87,7 +87,9 @@ static int __init cbsensor_init(void)
 	ktfutce_register();
 	TRY_STEP(TASK, netfilter_initialize(g_enableHooks));
 	TRY_STEP(NET_FIL, file_write_table_init());
+	#if LINUX_VERSION_CODE < KERNEL_VERSION(4,2,0)
 	TRY_STEP(FILE_PROC, lsm_initialize(g_enableHooks));
+	#endif
 	TRY_STEP(LSM, syscall_initialize(g_enableHooks));
 	TRY_STEP(SYSCALL, cb_proc_initialize());
 	TRY_STEP(DEVNODE, user_devnode_init());
@@ -124,13 +126,14 @@ CATCH_DEFAULT:
 void cbsensor_shutdown(void)
 {
 	// If the hooks have been modified abort the shutdown.
+	#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 2, 0)
 	if (syscall_hooks_changed(g_enableHooks) ||
 	    lsm_hooks_changed(g_enableHooks)) {
 		PRINTK(KERN_WARNING,
 		       "System call hooks changed, not removing hooks");
 		return;
 	}
-
+	#endif
 	// Remove hooks
 	cb_proc_shutdown();
 	syscall_shutdown(g_enableHooks);

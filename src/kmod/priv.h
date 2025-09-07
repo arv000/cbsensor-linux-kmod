@@ -139,9 +139,13 @@ void cbsensor_shutdown(void);
 // ------------------------------------------------
 // Linux Security Module Helpers
 //
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 2, 0)
+extern bool lsm_initialize(void);
+#else
 extern bool lsm_initialize(uint32_t enableHooks);
-extern void lsm_shutdown(void);
 extern bool lsm_hooks_changed(uint32_t enableHooks);
+#endif
+extern void lsm_shutdown(void);
 
 // ------------------------------------------------
 // Linux Syscall Hook Helpers

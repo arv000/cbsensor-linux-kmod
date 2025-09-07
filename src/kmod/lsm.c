@@ -10,9 +10,10 @@ static bool g_lsmRegistered = false;
 
 struct security_operations *g_original_ops_ptr; // Any LSM which we are layered
 	// on top of
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 2, 0)
 static struct security_operations g_combined_ops; // Original LSM plus our hooks
 	// combined
-
+#endif
 extern int cb_bprm_check_security(struct linux_binprm *bprm);
 extern void cb_bprm_committed_creds(struct linux_binprm *bprm);
 
@@ -50,7 +51,22 @@ extern int socket_recvmsg(struct socket *sock, struct msghdr *msg, int size,
 
 extern int socket_post_create(struct socket *sock, int family, int type,
 			      int protocol, int kern);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 2, 0)
+#include <linux/lsm_hooks.h>
 
+static struct security_hook_list cb_hooks[] = {
+    LSM_HOOK_INIT(inode_create, on_inode_create),
+    // 其他 hooks 也在这里加
+};
+
+
+bool lsm_initialize(void)
+{
+	return false;
+}
+#endif
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4,2,0)
 bool lsm_initialize(uint32_t enableHooks)
 {
 	TRY_CB_RESOLVED(security_ops);
@@ -58,10 +74,12 @@ bool lsm_initialize(uint32_t enableHooks)
 	//
 	// Save off the old LSM pointers
 	//
+	#if LINUX_VERSION_CODE < KERNEL_VERSION(4,2,0)
 	g_original_ops_ptr = *CB_RESOLVED(security_ops);
 	if (g_original_ops_ptr != NULL) {
 		g_combined_ops = *g_original_ops_ptr;
 	}
+	#endif
 	PR_DEBUG("Other LSM named %s", g_original_ops_ptr->name);
 
 	//
@@ -180,7 +198,7 @@ bool lsm_hooks_changed(uint32_t enableHooks)
 
 	return changed;
 }
-
+#endif
 void lsm_shutdown(void)
 {
 	if (g_lsmRegistered && CB_CHECK_RESOLVED(security_ops)) {
