@@ -17,7 +17,9 @@
 #include <net/ip.h>
 #include <net/sock.h>
 #include <net/udp.h>
-
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,18,0)
+#include <linux/time64.h>
+#endif
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 10, 0)
 #include <linux/inet.h>
 #endif
@@ -64,7 +66,11 @@ struct NET_TBL_KEY {
 };
 
 struct NET_TBL_VALUE {
+#if	LINUX_VERSION_CODE >= KERNEL_VERSION(4, 10, 0)
+	struct timespec64 last_seen;
+#else
 	struct timespec last_seen;
+#endif
 	uint64_t count;
 };
 
@@ -86,7 +92,7 @@ LIST_HEAD(g_net_age_list);
 
 #define NET_TBL_SIZE 262000
 #define NET_TBL_PURGE 200000
-
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5,10,0)
 #define TIMED_RECV(recv_func, sock, dlta, our_timeout, return_code)                  \
 	{                                                                            \
 		if (sock && sock->sk) {                                              \
@@ -161,7 +167,78 @@ LIST_HEAD(g_net_age_list);
 			} while (our_timeout && return_code == -EAGAIN);             \
 		}                                                                    \
 	}
+#else
+#define TIMED_RECV(recv_func, sock, dlta, our_timeout, return_code)                  \
+	{                                                                            \
+		if (sock && sock->sk) {                                              \
+			do {                                                         \
+				/* Figure out when we expect our timer to exit     \
+				 * so we can check for that later */ \
+				unsigned long expire =                               \
+					sock->sk->sk_rcvtimeo + jiffies;             \
+                                                                                     \
+				/* Call the system call to get the packet data     \
+				 */ \
+				return_code = recv_func;          \
+                                                                                     \
+				/* If there was time left on the timer, it         \
+				   means that we either received some data or      \
+				   something is wrong with the socket (some        \
+				   applications cause it to close early). In       \
+				   either case we want to exit the loop now.       \
+				 */ \
+				if (time_before(jiffies, expire)) {                  \
+					break;                                       \
+				}                                                    \
+                                                                                     \
+				/* If the module is exiting we need to return      \
+				 * from the function. */ \
+				if (g_exiting) {                                     \
+					/* If we set the timeout then don't        \
+					   return 0 because it may cause the       \
+					   consumer to think the socket was        \
+					   closed. Instead, return -EINTR to       \
+					   indicate that we returned sooner        \
+					   than requested. */ \
+					if (our_timeout &&                           \
+					    return_code == -EAGAIN) {                \
+						PR_DEBUG(                            \
+							"g_exiting=TRUE, pid=%d, "   \
+							"sock=0x%p, dlta=%ld "       \
+							"sec, returning -EINTR\n",   \
+							current->pid, sock,          \
+							dlta / HZ);                  \
+						return_code = -EINTR;                \
+					}                                            \
+					break;                                       \
+				}                                                    \
+                                                                                     \
+				/* The caller has set a timeout value larger       \
+				   than what we use, we want to subtract from      \
+				   it after each of our timeouts.  When the        \
+				   last timeout will cause their timeout to        \
+				   expire we configure the system to return        \
+				   the EAGAIN. */ \
+				if (dlta) {                                          \
+					dlta -= UDP_PACKET_TIMEOUT;                  \
+					/* We don't want to set                    \
+					 * sock->sk->sk_rcvtimeo to 0, it          \
+					 * would mean infinite timeout */ \
+					if (dlta <= 0) {                             \
+						/* If we're here it means we       \
+						 * didn't receive data and         \
+						 * xcode has error code now */ \
+						break;                               \
+					} else if (dlta <                            \
+						   UDP_PACKET_TIMEOUT) {             \
+						sock->sk->sk_rcvtimeo = dlta;        \
+					}                                            \
+				}                                                    \
+			} while (our_timeout && return_code == -EAGAIN);             \
+		}                                                                    \
+	}
 
+#endif
 #define PEEK(recv_func, sock, msg_peek, sk_rcvtimeo_dlta, our_timeout, flags,    \
 	     return_code)                                                        \
 	{                                                                        \
@@ -313,11 +390,21 @@ static void udp_for_each(bool (*callback)(struct sock *))
 static bool udp_configure_raddr(struct sock *sk)
 {
 	const int on = 1;
-
-	// Configure UDP sockets to extract the destination IP
-	kernel_setsockopt(sk->sk_socket, SOL_IP, IP_PKTINFO, (char *)&on,
-			  sizeof(on));
-
+  	int err;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,0,0)
+    // sock_setsockopt
+    err = sock_setsockopt(sk->sk_socket, SOL_IP, IP_PKTINFO, 
+                         KERNEL_SOCKPTR(&on), sizeof(on));
+#else
+    //  kernel_setsockopt
+    err = kernel_setsockopt(sk->sk_socket, SOL_IP, IP_PKTINFO, 
+                           (char *)&on, sizeof(on));
+#endif
+	
+	if (err < 0) {
+        pr_err("Failed to set IP_PKTINFO: %d\n", err);
+        return false;
+    }	
 	return true;
 }
 
@@ -327,7 +414,11 @@ static void udp_init_sockets(void)
 }
 
 struct priv_data {
-	struct timespec time;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,18,0)
+    struct timespec64 time;
+#else
+    struct timespec time;
+#endif
 	uint32_t count;
 };
 
@@ -374,7 +465,13 @@ static void network_tracking_clean(int sec)
 	uint64_t total = atomic64_read(&(g_net_hash_table->tableInstance));
 
 	data.count = 0;
-	getnstimeofday(&data.time);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,18,0)
+    // 内核 4.18+ 使用新的 API
+    ktime_get_real_ts64(&data.time);
+#else
+    // 旧内核使用 getnstimeofday
+    getnstimeofday(&data.time);
+#endif
 
 	data.time.tv_sec -= sec;
 	data.count = total;
@@ -538,7 +635,12 @@ static bool track_connection(pid_t pid, struct sockaddr *localAddr,
 	}
 
 	// Update the last seen time and count
-	getnstimeofday(&node->value.last_seen);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,18,0)
+    ktime_get_real_ts64(&node->value.last_seen);
+#else
+    getnstimeofday(&node->value.last_seen);
+#endif
+
 	++node->value.count;
 
 	// In case this connection is already tracked remove it from it's
@@ -600,19 +702,28 @@ static bool cb_getudppeername(struct sock *sk, union CB_SOCK_ADDR *remoteAddr,
 	int namelen;
 	bool rval = false;
 
-	mm_segment_t oldfs = get_fs();
-	set_fs(get_ds());
-
 	namelen = msg->msg_namelen;
 	if (sk->sk_protocol == IPPROTO_UDP && msg->msg_name && namelen) {
 		unsigned int nbytes = (sizeof(remoteAddr->ss_addr) >= namelen) ?
 					      namelen :
 					      sizeof(remoteAddr->ss_addr);
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,0,0)
+		// 内核 5.x+ 使用 copy_from_user
+		if (copy_from_user(&remoteAddr->ss_addr, msg->msg_name, nbytes) == 0) {
+			rval = true;
+		}
+#else
+		// 旧内核使用 set_fs/get_fs
+		mm_segment_t oldfs = get_fs();
+		set_fs(get_ds());
+		
 		memcpy(&remoteAddr->ss_addr, msg->msg_name, nbytes);
 		rval = true;
+		
+		set_fs(oldfs);
+#endif
 	}
-
-	set_fs(oldfs);
 	return rval;
 }
 
@@ -728,8 +839,11 @@ int socket_post_create(struct socket *sock, int family, int type, int protocol,
 	MODULE_GET();
 
 	// This will always be called anyway, so just do it first.
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,0,0)
+#else
 	xcode = g_original_ops_ptr->socket_post_create(sock, family, type,
 						       protocol, kern);
+#endif
 	TRY(xcode >= 0);
 
 	TRY(!cbIngoreProcess(getpid(current)));
@@ -761,7 +875,10 @@ int socket_sendmsg(struct socket *sock, struct msghdr *msg, int size)
 	MODULE_GET();
 
 	// This will always be called anyway, so just do it first.
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,0,0)
+#else
 	xcode = g_original_ops_ptr->socket_sendmsg(sock, msg, size);
+#endif
 	TRY(xcode >= 0);
 
 	TRY(pid != 0);
@@ -851,17 +968,30 @@ static bool copy_udp_control_msg(struct cmsghdr **cmsg_kernel,
 			"Failed to allocate space for message control struct");
 		return false;
 	}
-
-	oldfs = get_fs();
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,0,0)
+	// 内核 5.x+：直接使用 copy_from_user
+	if (copy_from_user(*cmsg_kernel, msg->msg_control, msg->msg_controllen)) {
+		PRINTK_RATELIMITED(KERN_WARNING,
+				   "Failed to copy message control struct");
+		kfree(*cmsg_kernel);
+		*cmsg_kernel = NULL;
+		return false;
+	}
+#else
+	// 旧内核：使用 set_fs/get_fs
+	mm_segment_t oldfs = get_fs();
 	set_fs(get_ds());
-	if (copy_from_user(*cmsg_kernel, msg->msg_control,
-			   msg->msg_controllen)) {
+	
+	if (copy_from_user(*cmsg_kernel, msg->msg_control, msg->msg_controllen)) {
 		PRINTK_RATELIMITED(KERN_WARNING,
 				   "Failed to copy message control struct");
 		set_fs(oldfs);
+		kfree(*cmsg_kernel);
+		*cmsg_kernel = NULL;
 		return false;
 	}
 	set_fs(oldfs);
+#endif
 
 	return true;
 }
@@ -952,7 +1082,13 @@ int _socket_recvmsg(struct socket *sock, struct msghdr *msg, int size,
 
 	// For UDP this will probably just get the port
 	addressLength = sizeof(union CB_SOCK_ADDR);
-	kernel_getsockname(sock, &localAddr.sa_addr, &addressLength);
+#if LINUX_VERSION_CODE < KERNEL_VERSION(3,13,0)
+    /*  kernel_getsockname(sock, addr, addrlen)  */
+   	kernel_getsockname(sock, &localAddr.sa_addr, &addressLength);
+#else
+	kernel_getsockname(sock, &localAddr.sa_addr);
+#endif
+
 
 	if (proto == IPPROTO_UDP) {
 		get_udp_address(pid, msg, &localAddr);
@@ -1007,8 +1143,10 @@ int socket_recvmsg(struct socket *sock, struct msghdr *msg, int size, int flags)
 {
 	int xcode = 0;
 	MODULE_GET();
-
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,0,0)
+#else
 	xcode = g_original_ops_ptr->socket_recvmsg(sock, msg, size, flags);
+#endif
 	TRY(xcode >= 0);
 
 	// CB-10087, CB-9235
@@ -1044,7 +1182,10 @@ int cb_socket_connect_hook(struct socket *sock, struct sockaddr *addr,
 	MODULE_GET();
 
 	// This will always be called anyway, so just do it first.
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,0,0)
+#else
 	xcode = g_original_ops_ptr->socket_connect(sock, addr, addrlen);
+#endif
 	TRY(xcode >= 0);
 	TRY(sock);
 
@@ -1065,9 +1206,11 @@ int cb_socket_connect_hook(struct socket *sock, struct sockaddr *addr,
 	// not supposed to be handled in this hook.
 	//
 	TRY(sock->sk->sk_protocol == IPPROTO_TCP);
-
+#if LINUX_VERSION_CODE < KERNEL_VERSION(3,13,0)
 	kernel_getsockname(sock, &localAddr.sa_addr, &addressLength);
-
+#else
+	kernel_getsockname(sock, &localAddr.sa_addr);
+#endif
 	// Track this connection in the local table
 	//  If it is a new connection, add an entry and send an event (return
 	//  value of true) If it is a tracked connection, update the time and
@@ -1128,7 +1271,10 @@ int cb_inet_conn_request(struct sock *sk, struct sk_buff *skb,
 	MODULE_GET();
 
 	// This will always be called anyway, so just do it first.
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,0,0)
+#else
 	xcode = g_original_ops_ptr->inet_conn_request(sk, skb, req);
+#endif
 	TRY(xcode >= 0);
 
 	// Without valid structures, we're dead in the water so there is no
@@ -1240,7 +1386,10 @@ int on_sock_rcv_skb(struct sock *sk, struct sk_buff *skb)
 	}
 
 CATCH_DEFAULT:
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,0,0)
+#else
 	xcode = g_original_ops_ptr->socket_sock_rcv_skb(sk, skb);
+#endif
 	MODULE_PUT();
 	return xcode;
 }
@@ -1250,10 +1399,15 @@ CATCH_DEFAULT:
 long (*cb_orig_sys_recvfrom)(int, void __user *, size_t, unsigned,
 			     struct sockaddr __user *, int __user *);
 long (*cb_orig_sys_recvmsg)(int fd, struct msghdr __user *msg, unsigned flags);
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5,0,0)
 long (*cb_orig_sys_recvmmsg)(int fd, struct mmsghdr __user *msg,
 			     unsigned int vlen, unsigned flags,
 			     struct timespec __user *timeout);
-
+#else
+	long (*cb_orig_sys_recvmmsg)(int fd, struct mmsghdr __user *msg,
+			     unsigned int vlen, unsigned flags,
+			     struct timespec64 __user *timeout);
+#endif
 // The functions below replace the linux syscalls.  In most cases we will also
 // call the original syscall.
 
@@ -1339,11 +1493,16 @@ asmlinkage long cb_sys_recvmsg(int fd, struct msghdr __user *msg,
 		struct iovec iovec_peek = { 0 };
 		char iovec_peek_buf[IOV_FOR_MSG_PEEK_SIZE] = { 0 };
 		char cbuf[CMSG_SPACE(sizeof(struct in_pktinfo))] = { 0 };
-
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4,19,0)
 		msg_peek.msg_iovlen = 1;
 		msg_peek.msg_iov = &iovec_peek;
 		msg_peek.msg_iov->iov_len = IOV_FOR_MSG_PEEK_SIZE;
 		msg_peek.msg_iov->iov_base = iovec_peek_buf;
+#else
+		iovec_peek.iov_len = IOV_FOR_MSG_PEEK_SIZE;
+		iovec_peek.iov_base = iovec_peek_buf;
+		iov_iter_init(&msg_peek.msg_iter, READ, &iovec_peek, 1, IOV_FOR_MSG_PEEK_SIZE);
+#endif
 		msg_peek.msg_name = &sock_addr_peek;
 		msg_peek.msg_namelen = sizeof(sock_addr_peek);
 		msg_peek.msg_control = cbuf;
@@ -1376,14 +1535,23 @@ CATCH_DEFAULT:
 	MODULE_PUT();
 	return xcode;
 }
-
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5,0,0)
 asmlinkage long cb_sys_recvmmsg(int fd, struct mmsghdr __user *msg,
 				unsigned int vlen, unsigned flags,
 				struct timespec __user *timeout)
+#else
+asmlinkage long cb_sys_recvmmsg(int fd, struct mmsghdr __user *msg,
+				unsigned int vlen, unsigned flags,
+				struct timespec64 __user *timeout)
+#endif
 {
 	int xcode;
 	struct socket *sock;
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5,0,0)
 	struct timespec _timeout = { 0, 0 };
+#else
+	struct timespec64 _timeout = { 0, 0 };
+#endif
 	unsigned _flags = flags;
 	bool weSetTimeout = false;
 	long sk_rcvtimeo = MAX_SCHEDULE_TIMEOUT;
@@ -1461,8 +1629,13 @@ asmlinkage long cb_sys_recvmmsg(int fd, struct mmsghdr __user *msg,
 		char iovec_peek_buf[IOV_FOR_MSG_PEEK_SIZE] = { 0 };
 		char cbuf[CMSG_SPACE(sizeof(struct in_pktinfo))] = { 0 };
 		long sk_rcvtimeo_dlta_peek = 0;
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5,0,0)	
 		struct timespec *p_timeout = NULL;
-
+#else
+		struct timespec64 *p_timeout = NULL;
+#endif
+	
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5,0,0)	
 		mmsg_peek.msg_hdr.msg_iovlen = 1;
 		mmsg_peek.msg_hdr.msg_iov = &iovec_peek;
 		mmsg_peek.msg_hdr.msg_iov->iov_len = IOV_FOR_MSG_PEEK_SIZE;
@@ -1471,6 +1644,18 @@ asmlinkage long cb_sys_recvmmsg(int fd, struct mmsghdr __user *msg,
 		mmsg_peek.msg_hdr.msg_namelen = sizeof(sock_addr_peek);
 		mmsg_peek.msg_hdr.msg_control = cbuf;
 		mmsg_peek.msg_hdr.msg_controllen = sizeof(cbuf);
+	#else
+		struct msghdr msg_hdr = {0};
+		struct kvec iov_peek;
+		char iov_buf[IOV_FOR_MSG_PEEK_SIZE] = {0};
+
+		iov_peek.iov_base = iov_buf;
+		iov_peek.iov_len  = sizeof(iov_buf);
+
+		iov_iter_kvec(&msg_hdr.msg_iter, READ, &iov_peek, 1, sizeof(iov_buf));
+		msg_hdr.msg_name = &sock_addr_peek;
+		msg_hdr.msg_namelen = sizeof(sock_addr_peek);
+	#endif
 		mmsg_peek.msg_len = 0;
 
 		// Initial value of sk_rcvtimeo_dlta should be restored after
@@ -1500,17 +1685,29 @@ asmlinkage long cb_sys_recvmmsg(int fd, struct mmsghdr __user *msg,
 		// packet for now
 		// TODO: CB-11228 - we need to check/report every packet we
 		// received, not only the first one
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5,0,0)
 		PEEK(cb_orig_sys_recvmmsg(fd, &mmsg_peek, 1, _flags, p_timeout),
 		     sock, mmsg_peek.msg_hdr, sk_rcvtimeo_dlta_peek,
 		     weSetTimeout, flags, xcode);
+#else
+		PEEK(cb_orig_sys_recvmmsg(fd, &mmsg_peek, 1, _flags, p_timeout),
+		     sock, msg_hdr, sk_rcvtimeo_dlta_peek,
+		     weSetTimeout, flags, xcode);
 
+#endif
 		// If the caller provided timeout our kernel space timespec
 		// structure was updated by the recvmmsg() syscall Now we need
 		// to copy it back to the caller's structure
 		if (timeout && p_timeout) {
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5,0,0)
 			TRY_SET(!copy_to_user(timeout, p_timeout,
 					      sizeof(struct timespec)),
 				-EINVAL);
+#else
+				TRY_SET(!copy_to_user(timeout, p_timeout,
+					      sizeof(struct timespec64)),
+				-EINVAL);
+#endif
 		}
 	}
 

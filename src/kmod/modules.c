@@ -125,7 +125,9 @@ int on_file_mmap(struct file *file, unsigned long reqprot, unsigned long prot,
 	logger_submit_event(event);
 
 mmap_exit:
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 10, 0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 10, 0)
+
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(3, 10, 0)
 	xcode = g_original_ops_ptr->mmap_file(file, reqprot, prot, flags);
 #else
 	xcode = g_original_ops_ptr->file_mmap(file, reqprot, prot, flags, addr,
