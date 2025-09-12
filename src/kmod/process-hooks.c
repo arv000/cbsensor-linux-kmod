@@ -79,7 +79,11 @@ struct dentry *get_dentry_from_mm(struct mm_struct *mm)
 	// in the stack. Eventually, we should fix that. Since this can be
 	// called from inside an interrupt we should to avoid a call to sleep so
 	// we'll try once and fail if the lock is held.
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,8,0)
+	if (0 == mmap_read_trylock(mm)) {
+#else
 	if (0 == down_read_trylock(&mm->mmap_sem)) {
+#endif
 		PR_DEBUG("unable to down semaphore");
 		goto dentry_mm_exit;
 	}
@@ -123,10 +127,18 @@ struct dentry *get_dentry_from_mm(struct mm_struct *mm)
 	}
 
 	if (vma && vma->vm_file) {
-		dentryp = vma->vm_file->f_dentry;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3,1,0)
+			dentryp = vma->vm_file->f_path.dentry;
+#else
+			dentryp = vma->vm_file->f_dentry;
+#endif
 	}
 
-	up_read(&mm->mmap_sem);
+	#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,8,0)
+mmap_read_unlock(mm);
+#else
+up_read(&mm->mmap_sem);
+#endif
 
 dentry_mm_exit:
 	return dentryp;
@@ -197,7 +209,10 @@ void cb_task_free(struct task_struct *p)
 	}
 
 task_free_exit:
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,0,0)
+#else
 	g_original_ops_ptr->task_free(p);
+#endif
 	MODULE_PUT();
 }
 #else
@@ -353,8 +368,10 @@ int cb_bprm_check_security(struct linux_binprm *bprm)
 	if (tid != INITTASK) {
 		killit = cbKillBannedProcessByInode(ino);
 	}
-
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,0,0)
+#else
 	stat = g_original_ops_ptr->bprm_set_creds(bprm);
+#endif
 	if (stat || killit) {
 		PR_DEBUG("set creds kill %s %d %llu %d %d", bprm->filename, pid,
 			 ino, killit, stat);
@@ -420,7 +437,10 @@ int cb_bprm_check_security(struct linux_binprm *bprm)
 	}
 
 check_security_exit:
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,0,0)
+#else
 	ret = g_original_ops_ptr->bprm_check_security(bprm);
+#endif
 	MODULE_PUT();
 	return ret;
 }
@@ -537,6 +557,9 @@ void cb_bprm_committed_creds(struct linux_binprm *bprm)
 	logger_submit_event(event);
 
 commited_creds_exit:
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,0,0)
+#else
 	g_original_ops_ptr->bprm_committed_creds(bprm);
+#endif
 	MODULE_PUT();
 }
