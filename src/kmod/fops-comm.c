@@ -95,7 +95,11 @@ struct CB_EVENT_STATS {
 	//  tx_proxy
 	//  tx_block
 	atomic64_t stats[MAX_INTERVALS][NUM_STATS];
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5,0,0)
 	struct timespec time[MAX_INTERVALS];
+#else
+	struct timespec64 time[MAX_INTERVALS];
+#endif
 
 	// These are live counters that rise and fall as events are generated.
 	// This variable
@@ -201,7 +205,11 @@ bool user_comm_initialize(void)
 		atomic64_set(&cb_event_stats.stats[0][i], 0);
 		atomic64_set(&cb_event_stats.stats[MAX_INTERVALS - 1][i], 0);
 	}
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,18,0)
+	ktime_get_real_ts64(&cb_event_stats.time[0]);
+#else
 	getnstimeofday(&cb_event_stats.time[0]);
+#endif
 	kernel_mem = hashtbl_get_memory();
 	atomic64_set(&mem_kernel, kernel_mem);
 	atomic64_set(&mem_kernel_peak, kernel_mem);
@@ -305,13 +313,23 @@ int user_comm_send_event_atomic(struct CB_EVENT *msg)
 	case CB_EVENT_TYPE_PROCESS_EXIT:
 	case CB_EVENT_TYPE_PROCESS_BLOCKED:
 	case CB_EVENT_TYPE_PROCESS_NOT_BLOCKED:
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5,0,0)
 		enqueued = kfifo_put(&msg_queue_pri0,
 				     (const struct CB_EVENT **)&msg);
+#else
+		enqueued = kfifo_put(&msg_queue_pri0,
+				     msg);
+#endif			
 		tx_ready = &tx_ready_pri0;
 		break;
 	default:
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5,0,0)	
 		enqueued = kfifo_put(&msg_queue_pri1,
 				     (const struct CB_EVENT **)&msg);
+#else
+		enqueued = kfifo_put(&msg_queue_pri1,
+				     msg);
+#endif			
 		tx_ready = &tx_ready_pri1;
 		break;
 	}
@@ -718,7 +736,11 @@ static void stats_work_task(struct work_struct *work)
 	}
 	atomic_set(&current_stat, next);
 	atomic_inc(&valid_stats);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,18,0)
+	ktime_get_real_ts64(&cb_event_stats.time[next]);
+#else
 	getnstimeofday(&cb_event_stats.time[next]);
+#endif
 	kernel_mem = hashtbl_get_memory();
 	kernel_mem_peak = atomic64_read(&mem_kernel_peak);
 	atomic64_set(&mem_kernel, kernel_mem);
@@ -852,8 +874,11 @@ ssize_t cb_proc_show_events_rst(struct file *file, const char *buf, size_t size,
 		atomic64_set(&cb_event_stats.stats[0][i], 0);
 		atomic64_set(&cb_event_stats.stats[MAX_INTERVALS - 1][i], 0);
 	}
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,18,0)	
+	ktime_get_real_ts64(&cb_event_stats.time[0]);
+#else
 	getnstimeofday(&cb_event_stats.time[0]);
-
+#endif
 	// Resatrt the job from now
 	schedule_delayed_work(&stats_work, g_stats_work_delay);
 	return size;
