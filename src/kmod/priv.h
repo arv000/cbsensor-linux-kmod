@@ -180,7 +180,9 @@ extern pid_t getpid(struct task_struct *task);
 extern pid_t gettid(struct task_struct *task);
 extern pid_t getppid(struct task_struct *task);
 extern struct task_struct *cb_find_task(pid_t pid);
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5,0,0)
 extern void get_starttime(struct timespec *start_time);
+#endif
 extern void create_process_start_event(struct task_struct *task);
 
 // ------------------------------------------------
