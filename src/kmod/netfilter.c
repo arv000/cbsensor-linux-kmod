@@ -46,7 +46,7 @@ static unsigned int hook_func_local_out(
 #endif
 	struct sk_buff *skb, const struct net_device *in,
 	const struct net_device *out,
-#if RHEL_RELEASE_CODE >= RHEL_RELEASE_VERSION(7, 2)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 4, 0)
 	const struct nf_hook_state *state
 #else
 	int (*okfn)(struct sk_buff *)

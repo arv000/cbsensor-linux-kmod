@@ -182,7 +182,7 @@ kbpbi_exit:
 void cbKillRunningBannedProcessByInode(uint64_t ino)
 {
 	pid_t pid;
-	struct siginfo info;
+	//struct siginfo info;
 	int ret;
 	struct list_head *pos, *safe_del;
 	struct ProcessTracking *procp = NULL;
@@ -197,11 +197,25 @@ void cbKillRunningBannedProcessByInode(uint64_t ino)
 	}
 
 	PRINTK(KERN_INFO, "Kill process with ino=%llu", ino);
-
-	memset(&info, 0, sizeof(struct siginfo));
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,0,0)
+    
+    struct kernel_siginfo info;
+    memset(&info, 0, sizeof(struct kernel_siginfo));
 	info.si_signo = SIGKILL;
 	info.si_code = 0;
 	info.si_errno = 1234;
+#else
+    struct siginfo info;
+    memset(&info, 0, sizeof(struct siginfo));
+	info.si_signo = SIGKILL;
+	info.si_code = 0;
+	info.si_errno = 1234;
+#endif
+
+	// memset(&info, 0, sizeof(struct siginfo));
+	// info.si_signo = SIGKILL;
+	// info.si_code = 0;
+	// info.si_errno = 1234;
 
 	memset(&sRunningInodesToBan, 0, sizeof(struct RunningBannedInodeInfo));
 	sRunningInodesToBan.inode = ino;
